@@ -227,29 +227,76 @@ def render_life_times() -> None:
         st.caption("생활일정은 참고 기록입니다. 실제 작업 가능 시간은 아래 정기 시간표와 특별 일정에서 조절합니다.")
 
 
+def calendar_hover_styles(events: list[dict]) -> str:
+    rules = []
+    for index, event in enumerate(events):
+        name = f"calendar-title-{index}"
+        event["classNames"] = [*event.get("classNames", []), name]
+        title = str(event.get("title", ""))
+        escaped = "".join(
+            f"\\{ord(char):x} " if char in '\\"<>' or ord(char) < 32 else char
+            for char in title
+        )
+        rules.append(f'.{name} {{ --calendar-full-title: "{escaped}"; }}')
+    return "\n".join(rules)
+
+
 def render_calendar(tasks, weekly, special, reference: datetime) -> None:
     st.caption("월간은 일정과 마감을, 주간은 시간대와 가능 시간을 확인합니다. 일정 추가는 기존 입력 탭을 사용하세요.")
+    events = calendar_events(tasks, weekly, special, st.session_state.get("example_entries", []), st.session_state.get("example_life_times", []))
+    hover_styles = calendar_hover_styles(events)
     result = calendar(
-        events=calendar_events(tasks, weekly, special, st.session_state.get("example_entries", []), st.session_state.get("example_life_times", [])),
+        events=events,
         options={
             "initialView": "dayGridMonth", "initialDate": reference.date().isoformat(),
             "now": reference.isoformat(),
             "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek"},
             "buttonText": {"today": "오늘", "month": "월", "week": "주"},
             "locale": "ko", "firstDay": 1, "aspectRatio": 1.618, "editable": False,
-            "displayEventTime": True, "dayMaxEvents": 3, "eventTextColor": "#334155",
+            "height": "auto", "fixedWeekCount": True,
+            "displayEventTime": True, "displayEventEnd": False,
+            "dayMaxEvents": False, "dayMaxEventRows": False,
+            "eventDisplay": "block", "eventTextColor": "#334155",
             "eventBorderColor": "#dce4ec",
-        }, key="schedule_calendar", callbacks=["eventClick"],
-        custom_css="""
+        }, key="schedule_calendar_readable", callbacks=["eventClick"],
+        custom_css=hover_styles + "\n" + """
             .fc { --fc-border-color: #e5eaf0; --fc-today-bg-color: #f5f0e5; }
             .fc .fc-toolbar-title { font-size: 1.15rem; color: #334155; }
             .fc .fc-button-primary { background: #edf2f6; border-color: #dce4ec; color: #425466; }
             .fc .fc-button-primary:not(:disabled):hover,
             .fc .fc-button-primary:not(:disabled).fc-button-active { background: #dce7ef; border-color: #ccd9e3; color: #334155; }
-            .fc .fc-event-title { font-size: 0.84rem; }
+            .fc .fc-daygrid-day-frame { min-height: 170px; }
+            .fc .fc-daygrid-event { white-space: normal; align-items: flex-start; padding: 3px 4px; }
+            .fc .fc-event-title { font-size: 0.86rem; line-height: 1.4; }
+            .fc .fc-daygrid-event .fc-event-title {
+                white-space: normal; overflow-wrap: anywhere; word-break: keep-all;
+                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+            .fc .fc-daygrid-event .fc-event-time { flex-shrink: 0; }
+            .fc .fc-daygrid-event-harness:hover,
+            .fc .fc-timegrid-event-harness:hover { z-index: 10000 !important; }
+            .fc .fc-event:hover, .fc .fc-event:focus-within { overflow: visible !important; z-index: 10000 !important; }
+            .fc .fc-event:hover::after, .fc .fc-event:focus-within::after {
+                content: var(--calendar-full-title); position: absolute;
+                top: calc(100% + 5px); left: 0; z-index: 10001;
+                width: max-content; max-width: min(440px, 82vw); box-sizing: border-box;
+                padding: 10px 12px; border: 1px solid #cbd5df; border-radius: 6px;
+                background: #ffffff; color: #263544; box-shadow: 0 3px 12px #26354420;
+                font-size: 0.9rem; line-height: 1.5; font-weight: 400;
+                white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none;
+            }
+            .fc .fc-daygrid-day:nth-child(n+5) .fc-event::after,
+            .fc .fc-timegrid-col:nth-last-child(-n+2) .fc-event::after { left: auto; right: 0; }
+            .fc .fc-daygrid-body tr:nth-last-child(-n+2) .fc-event::after { top: auto; bottom: calc(100% + 5px); }
+            @media (max-width: 640px) {
+                .fc .fc-toolbar { gap: 8px; flex-wrap: wrap; }
+                .fc .fc-toolbar-title { font-size: 1rem; }
+            }
         """,
     )
     st.caption("연한 초록은 가능 시간, 회색은 불가 시간, 베이지색은 생활일정입니다. 시간 범위가 미정인 생활일정은 날짜 영역에 표시합니다.")
+    st.caption("긴 일정명은 마우스를 올리면 전체를 볼 수 있습니다. 클릭하면 아래에도 표시됩니다.")
     if isinstance(result, dict) and result.get("callback") == "eventClick":
         event = result["eventClick"]["event"]
         st.write(event["title"])
