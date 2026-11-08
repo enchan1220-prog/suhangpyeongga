@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ from algorithm import KST, WEEKDAY_LABELS, TaskInputError, ScheduleInputError, d
 
 
 EXAMPLE_PATH = Path(__file__).resolve().parent / "data" / "example_schedule.json"
+EXAMPLE_REVISION = 4
 
 
 def example_id(value: str) -> str:
@@ -42,6 +43,7 @@ def prepare_example(data: dict):
                 "remaining_minutes": 0 if entry["completed"] else estimate["remaining_minutes"],
                 "category": entry["subject"], "status": "done" if entry["completed"] else "pending",
                 "splittable": True,
+                "work_type": entry.get("work_type", "general"),
             }, now=reference)
             task = replace(task, id=example_id(entry["id"]))
             tasks[task.id] = task
@@ -76,11 +78,12 @@ def load_example(state, data: dict) -> bool:
     state["example_reference"] = reference
     state["example_use_reference"] = True
     state["example_loaded"] = True
+    state["example_revision"] = data.get("example_revision", 1)
     return True
 
 
 def update_example_life_times(state, data: dict) -> None:
-    _, proposed, _, reference = prepare_example(data)
+    proposed_tasks, proposed, _, reference = prepare_example(data)
     life_times = prepare_life_times(data.get("fixed_life_times", []))
     if not life_times:
         raise ValueError("갱신된 예시 원본을 먼저 설정하세요.")
@@ -91,7 +94,8 @@ def update_example_life_times(state, data: dict) -> None:
         previous[schedule.id] = schedule
     updated = dict(state["weekly_schedules"])
     for key, old in previous.items():
-        if updated.get(key) == old:
+        current = updated.get(key)
+        if current is not None and all(getattr(current, name, False if name == "study_only" else None) == value for name, value in asdict(old).items()):
             updated.pop(key)
             if key in proposed:
                 updated[key] = proposed[key]
@@ -99,7 +103,17 @@ def update_example_life_times(state, data: dict) -> None:
         if key not in previous:
             updated.setdefault(key, schedule)
     state["weekly_schedules"] = updated
+    tasks = dict(state["tasks"])
+    for key, proposed_task in proposed_tasks.items():
+        current = tasks.get(key)
+        if current is not None and getattr(current, "work_type", "general") == "general" and all(
+            getattr(current, name, None) == value
+            for name, value in asdict(proposed_task).items() if name != "work_type"
+        ):
+            tasks[key] = proposed_task
+    state["tasks"] = tasks
     state["example_life_times"] = life_times
+    state["example_revision"] = data.get("example_revision", 1)
 
 
 def render_example_controls(auto_load: bool = False) -> datetime:
@@ -111,7 +125,7 @@ def render_example_controls(auto_load: bool = False) -> datetime:
             st.error(f"채점용 예시를 불러오지 못했습니다. 앱의 예시 설정을 확인하세요. {error}")
     loaded = st.session_state.get("example_loaded", False)
     load = st.button("예시 불러오기", disabled=loaded, key="load_example")
-    update = loaded and not st.session_state.get("example_life_times") and st.button("생활시간 예시 갱신", key="update_life_times")
+    update = loaded and st.session_state.get("example_revision", 0) < EXAMPLE_REVISION and st.button("예시 조건 갱신", key="update_life_times")
     if load or update:
         try:
             data = read_example()
@@ -145,7 +159,7 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
         done = task.status == "done"
         event = {
             "id": task.id, "title": f"{'완료' if done else '마감'}: {task.title}",
-            "color": "#64748b" if done else "#2563eb",
+            "color": "#edf0f3" if done else "#dfe9f5",
             "extendedProps": {"description": source["status"] if source else "추가한 작업"},
         }
         if task.deadline_precision == "date":
@@ -164,7 +178,7 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
             "id": f"entry-{entry['id']}",
             "title": f"{entry['subject']}: {entry['title']} ({entry['status']})",
             "start": entry["start"], "allDay": True,
-            "color": "#64748b" if entry["completed"] else "#7c3aed",
+            "color": "#edf0f3" if entry["completed"] else "#ece6f5",
             "extendedProps": {"description": "시각 미지정 일정입니다. 가용시간에서 자동 차감하지 않습니다."},
         }
         if end < date.max:
@@ -173,26 +187,26 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
     for item in weekly.values():
         end_hour = item.end_time.hour + (24 if item.end_next_day else 0)
         events.append({
-            "id": item.id, "title": f"{'가능' if item.available else '불가'}: {item.title}",
+            "id": item.id, "title": f"{'공부만 가능' if getattr(item, 'study_only', False) else '가능' if item.available else '불가'}: {item.title}",
             "daysOfWeek": [(day + 1) % 7 for day in item.weekdays],
             "startTime": item.start_time.strftime("%H:%M"),
             "endTime": f"{end_hour:02d}:{item.end_time.minute:02d}",
-            "display": "background", "color": "#bbf7d0" if item.available else "#d1d5db",
+            "display": "background", "color": "#edf5ee" if item.available else "#eff0f2",
         })
     for item in special.values():
         events.append({
-            "id": item.id, "title": f"{'가능' if item.available else '불가'}: {item.title}",
+            "id": item.id, "title": f"{'공부만 가능' if getattr(item, 'study_only', False) else '가능' if item.available else '불가'}: {item.title}",
             "start": item.start_at.isoformat(), "end": item.end_at.isoformat(),
-            "display": "background", "color": "#bbf7d0" if item.available else "#d1d5db",
+            "display": "background", "color": "#edf5ee" if item.available else "#eff0f2",
         })
     for index, item in enumerate(life_times):
         event = {
             "id": f"life-{index}", "title": f"{item['title']} ({item['time_text']})",
             "daysOfWeek": [(day + 1) % 7 for day in item["weekdays"]],
-            "color": "#b45309",
+            "color": "#f5eddf",
             "extendedProps": {"description": "생활일정 기록입니다. 작업 가능 여부는 시간표 설정을 따릅니다. " + item.get("note", "")},
         }
-        if item.get("start_time") is None:
+        if item.get("start_time") is None or item.get("end_time") is None:
             event["allDay"] = True
         else:
             event.update(startTime=item["start_time"], endTime=item["end_time"], allDay=False)
@@ -222,11 +236,20 @@ def render_calendar(tasks, weekly, special, reference: datetime) -> None:
             "now": reference.isoformat(),
             "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek"},
             "buttonText": {"today": "오늘", "month": "월", "week": "주"},
-            "locale": "ko", "firstDay": 1, "height": 720, "editable": False,
-            "displayEventTime": True, "dayMaxEvents": 4,
+            "locale": "ko", "firstDay": 1, "aspectRatio": 1.618, "editable": False,
+            "displayEventTime": True, "dayMaxEvents": 3, "eventTextColor": "#334155",
+            "eventBorderColor": "#dce4ec",
         }, key="schedule_calendar", callbacks=["eventClick"],
+        custom_css="""
+            .fc { --fc-border-color: #e5eaf0; --fc-today-bg-color: #f5f0e5; }
+            .fc .fc-toolbar-title { font-size: 1.15rem; color: #334155; }
+            .fc .fc-button-primary { background: #edf2f6; border-color: #dce4ec; color: #425466; }
+            .fc .fc-button-primary:not(:disabled):hover,
+            .fc .fc-button-primary:not(:disabled).fc-button-active { background: #dce7ef; border-color: #ccd9e3; color: #334155; }
+            .fc .fc-event-title { font-size: 0.84rem; }
+        """,
     )
-    st.caption("초록 배경은 가능 시간, 회색 배경은 불가 시간, 주황색은 생활일정입니다. 시작 시각이 없는 생활일정은 날짜 영역에 표시합니다.")
+    st.caption("연한 초록은 가능 시간, 회색은 불가 시간, 베이지색은 생활일정입니다. 시간 범위가 미정인 생활일정은 날짜 영역에 표시합니다.")
     if isinstance(result, dict) and result.get("callback") == "eventClick":
         event = result["eventClick"]["event"]
         st.write(event["title"])
