@@ -96,6 +96,9 @@ def unpack_snapshot(payload: dict) -> dict:
         settings = payload.get("settings", {})
         if not isinstance(settings, dict):
             raise ValueError("계산 설정 형식을 확인하세요.")
+        if "auto_free" in settings:
+            if type(settings["auto_free"]) is not bool:
+                raise ValueError("빈 시간 자동 계산 설정을 확인하세요.")
         if "example_revision" in settings:
             if type(settings["example_revision"]) is not int or settings["example_revision"] < 0:
                 raise ValueError("예시 조건 버전을 확인하세요.")
