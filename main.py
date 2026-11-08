@@ -288,6 +288,7 @@ def main() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
     apply_pending_workspace(st.session_state)
+    st.session_state.pop("auto_free", None)
 
     st.title("작업 관리")
     render_storage_status()
