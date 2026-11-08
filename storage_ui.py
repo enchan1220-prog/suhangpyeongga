@@ -15,6 +15,7 @@ def apply_pending_workspace(state) -> None:
     workspace = state.pop("pending_workspace", None)
     if workspace is None:
         return
+    state.pop("example_revision", None)
     state.update(workspace)
     for name in ("add_revision", "edit_revision", "weekly_add_revision", "weekly_edit_revision", "special_add_revision", "special_edit_revision"):
         state[name] = state.get(name, 0) + 1
