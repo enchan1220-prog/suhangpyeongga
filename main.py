@@ -8,6 +8,7 @@ from storage_ui import apply_pending_workspace, is_cloud_mode, render_storage, r
 
 from algorithm import (
     STATUS_LABELS,
+    WORK_TYPE_LABELS,
     Task,
     TaskInputError,
     deadline_input_date,
@@ -63,6 +64,12 @@ def render_task_form(prefix: str, task: Task | None = None) -> None:
             category = st.text_input(
                 "카테고리", value=task.category if task else "", key=f"{prefix}_category"
             )
+            work_type = st.selectbox(
+                "작업 종류", options=list(WORK_TYPE_LABELS), format_func=WORK_TYPE_LABELS.__getitem__,
+                index=list(WORK_TYPE_LABELS).index(getattr(task, "work_type", "general")) if task else 0,
+                help="독서실의 공부 전용 시간에는 교과 공부와 문제풀이만 계산합니다.",
+                key=f"{prefix}_work_type",
+            )
             status = st.selectbox(
                 "진행 상태",
                 options=list(STATUS_LABELS),
@@ -97,6 +104,7 @@ def render_task_form(prefix: str, task: Task | None = None) -> None:
                 "category": category,
                 "status": status,
                 "splittable": splittable,
+                "work_type": work_type,
             },
             existing=task,
         )
@@ -215,18 +223,18 @@ def render_priorities(tasks, weekly, special, reference) -> None:
 
     shortages = [item for item in result.shared if item.shortage_minutes > 0]
     if shortages:
-        first = shortages[0]
+        first = min(shortages, key=lambda item: item.deadline_at)
+        scope_label = "프로젝트와 보고서" if first.scope == "general" else "전체 작업"
         st.warning(
-            f"{first.deadline_at:%Y-%m-%d %H:%M} 마감 경계까지 "
+            f"{scope_label} 기준, {first.deadline_at:%Y-%m-%d %H:%M}까지 "
             f"누적 작업량 {first.required_minutes:,}분, 공통 가용시간 {first.available_minutes:,.1f}분으로 "
             f"{first.shortage_minutes:,.1f}분 부족합니다."
         )
     st.subheader("우선순위")
     st.dataframe([
         {"순위": index, "작업명": item.task.title, "점수": round(item.total, 2),
-         "마감": format_deadline(item.task), "예상 작업시간(분)": item.task.remaining_minutes,
-         "여유(분)": round(item.availability.slack_minutes, 1), "시간 확인": item.availability.message,
-         "지금 착수": "가능" if item.fit == 100 else "대기"}
+         "마감": format_deadline(item.task), "시간 확인": item.availability.message,
+         "지금 시작": "가능" if item.fit == 100 else "대기"}
         for index, item in enumerate(result.ranked, start=1)
     ], hide_index=True, width="stretch")
     with st.expander("점수와 판단 근거"):
@@ -234,6 +242,9 @@ def render_priorities(tasks, weekly, special, reference) -> None:
         st.caption("긴급도는 작업량 압박 70%와 마감 근접도 30%를 합칩니다. 나눠서 하는 작업은 짧다는 이유로 가산하지 않습니다.")
         st.dataframe([
             {"작업명": item.task.title, "작업량 압박": round(item.pressure, 2),
+             "작업 종류": WORK_TYPE_LABELS[getattr(item.task, "work_type", "general")],
+             "예상 작업시간(분)": item.task.remaining_minutes,
+             "여유(분)": round(item.availability.slack_minutes, 1),
              "마감 근접도": round(item.proximity, 2), "긴급도": round(item.urgency, 2),
              "중요도 점수": item.importance_score, "착수 적합성": item.fit,
              "가용시간(분)": round(item.availability.available_minutes, 1),
@@ -253,6 +264,7 @@ def render_priorities(tasks, weekly, special, reference) -> None:
     with st.expander("마감별 누적 시간"):
         st.dataframe([
             {"마감 경계": f"{item.deadline_at:%Y-%m-%d %H:%M}",
+             "검사 대상": "프로젝트와 보고서" if item.scope == "general" else "전체 작업",
              "누적 필요(분)": item.required_minutes, "공통 가용시간(분)": round(item.available_minutes, 1),
              "부족(분)": round(item.shortage_minutes, 1)} for item in result.shared
         ], hide_index=True, width="stretch")
@@ -260,7 +272,13 @@ def render_priorities(tasks, weekly, special, reference) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="작업 우선순위 결정 시스템", layout="wide")
+    st.set_page_config(page_title="작업 우선순위 결정 시스템", layout="centered")
+    st.markdown("""
+        <style>
+        .block-container { max-width: 1040px; padding-top: 1.8rem; }
+        [data-testid="stTabs"] button { padding-left: 0.65rem; padding-right: 0.65rem; }
+        </style>
+    """, unsafe_allow_html=True)
     for key, value in (
         ("tasks", {}), ("add_revision", 0), ("edit_revision", 0),
         ("weekly_schedules", {}), ("special_schedules", {}),
