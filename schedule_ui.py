@@ -66,9 +66,15 @@ def render_schedule_form(kind: str, prefix: str, existing=None) -> None:
                 "다음 날 종료", value=existing.end_next_day if existing else False,
                 key=f"{prefix}_next_day",
             )
+        travel_text = st.text_input(
+            "편도 이동 시간(분, 선택)",
+            value=str(getattr(existing, "travel_minutes", 15)) if existing else "",
+            placeholder="15", help="비우면 일정 전후에 각각 15분을 제외합니다. 이동이 없으면 0을 입력하세요.",
+            key=f"{prefix}_travel_minutes",
+        )
         available = st.selectbox(
             "작업 가능 여부", options=[True, False],
-            index=0 if existing is None or existing.available else 1,
+            index=0 if existing is not None and existing.available else 1,
             format_func=lambda value: "작업 가능" if value else "작업 불가",
             key=f"{prefix}_available",
         )
@@ -89,6 +95,7 @@ def render_schedule_form(kind: str, prefix: str, existing=None) -> None:
                 "end_time": end_text, "end_next_day": next_day, "available": available,
                 "start_date": start_date, "end_date": end_date,
                 "study_only": study_only,
+                "travel_minutes": travel_text,
             }, kind=kind, existing=existing,
         )
     except ScheduleInputError as error:
@@ -118,6 +125,7 @@ def render_schedule_group(kind: str) -> None:
                 row = {"일정명": item.title, "시작": f"{item.start_at:%Y-%m-%d %H:%M}", "종료": f"{item.end_at:%Y-%m-%d %H:%M}"}
             row["작업"] = "가능" if item.available else "불가"
             row["작업 범위"] = "교과 공부와 문제풀이만" if getattr(item, "study_only", False) else "모든 작업"
+            row["편도 이동(분)"] = getattr(item, "travel_minutes", 15)
             rows.append(row)
         st.dataframe(rows, hide_index=True, width="stretch")
     else:
@@ -152,7 +160,8 @@ def render_schedule_group(kind: str) -> None:
 
 
 def render_schedules() -> None:
-    st.caption("가능 시간을 먼저 등록하세요. 특별 일정은 정기 시간표를 바꾸며, 특별 불가 시간이 우선합니다.")
+    st.caption("명시한 작업 가능 구간 안에서 일정과 이동 시간을 제외합니다. 등록하지 않은 빈 시간은 가용시간이 아닙니다.")
+    st.caption("기존 특별 일정의 예외 규칙은 유지하며, 특별 불가 일정과 이동 시간은 최종적으로 제외합니다.")
     weekly_tab, special_tab = st.tabs(["정기 시간표", "특별 일정"])
     with weekly_tab:
         render_schedule_group("weekly")
@@ -174,7 +183,7 @@ def render_availability(
     st.button("계산 새로고침", key="capacity_refresh")
     st.caption(f"기준: {now:%Y-%m-%d %H:%M} 한국 시각")
     if not weekly and not special:
-        st.info("시간표에서 작업 가능 시간을 등록하세요. 등록 전에는 가용시간이 0입니다.")
+        st.info("작업 가능한 구간을 시간표에 등록하세요. 등록 전에는 가용시간이 0입니다.")
     try:
         default_end = now.date() + timedelta(days=6)
     except OverflowError:
