@@ -7,6 +7,7 @@ from uuid import uuid4
 
 KST = timezone(timedelta(hours=9), name="KST")
 STATUS_LABELS = {"pending": "미시작", "doing": "진행 중", "done": "완료"}
+WORK_TYPE_LABELS = {"general": "프로젝트와 보고서 등", "study": "교과 공부와 문제풀이"}
 WEEKDAY_LABELS = ("월", "화", "수", "목", "금", "토", "일")
 MAX_CALCULATION_DAYS = 3660
 Interval = tuple[datetime, datetime]
@@ -26,6 +27,7 @@ class Task:
     splittable: bool
     created_at: datetime
     updated_at: datetime
+    work_type: str = "general"
 
 
 class TaskInputError(ValueError):
@@ -83,6 +85,9 @@ def validate_task(
     splittable = raw.get("splittable")
     if type(splittable) is not bool:
         errors["splittable"] = "나눠서 진행할 수 있는지 선택하세요."
+    work_type = raw.get("work_type", "general")
+    if not isinstance(work_type, str) or work_type not in WORK_TYPE_LABELS:
+        errors["work_type"] = "작업 종류를 선택하세요."
 
     deadline_date = raw.get("deadline_date")
     precision = raw.get("deadline_precision")
@@ -128,6 +133,7 @@ def validate_task(
         splittable=splittable,
         created_at=existing.created_at if existing else stamp,
         updated_at=stamp,
+        work_type=work_type,
     )
 
 
@@ -164,6 +170,7 @@ class WeeklySchedule:
     available: bool
     created_at: datetime
     updated_at: datetime
+    study_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,6 +183,7 @@ class SpecialSchedule:
     available: bool
     created_at: datetime
     updated_at: datetime
+    study_only: bool = False
 
 
 class ScheduleInputError(ValueError):
@@ -208,6 +216,9 @@ def validate_schedule(
     available = raw.get("available")
     if type(available) is not bool:
         errors["available"] = "작업 가능 여부를 선택하세요."
+    study_only = raw.get("study_only", False)
+    if type(study_only) is not bool:
+        errors["study_only"] = "공부 전용 여부를 선택하세요."
     clocks = {}
     for key, label in (("start_time", "시작 시각"), ("end_time", "종료 시각")):
         try:
@@ -266,6 +277,7 @@ def validate_schedule(
         available=available,
         created_at=existing.created_at if existing else stamp.astimezone(KST),
         updated_at=stamp.astimezone(KST),
+        study_only=study_only and available,
         **details,
     )
 
@@ -323,6 +335,7 @@ def build_available_intervals(
     special: Iterable[SpecialSchedule],
     start: datetime,
     end: datetime,
+    *, work_type: str | None = None,
 ) -> list[Interval]:
     _require_aware(start)
     _require_aware(end)
@@ -341,6 +354,8 @@ def build_available_intervals(
     first_day = date.fromordinal(max(1, start.date().toordinal() - 1))
     last_ordinal = end.date().toordinal()
     for schedule in weekly:
+        if schedule.available and getattr(schedule, "study_only", False) and work_type not in (None, "study"):
+            continue
         target = weekly_yes if schedule.available else weekly_no
         for weekday in schedule.weekdays:
             first_ordinal = first_day.toordinal() + (weekday - first_day.weekday()) % 7
@@ -355,6 +370,8 @@ def build_available_intervals(
                     )
                 add_clipped(target, begin, finish)
     for schedule in special:
+        if schedule.available and getattr(schedule, "study_only", False) and work_type not in (None, "study"):
+            continue
         add_clipped(
             special_yes if schedule.available else special_no,
             schedule.start_at,
@@ -418,7 +435,7 @@ def assess_task_availability(
     _require_aware(now)
     if task.status == "done":
         return TaskAvailability(0, 0, 0, 0, 0, "완료")
-    intervals = build_available_intervals(weekly, special, now, task.deadline_at)
+    intervals = build_available_intervals(weekly, special, now, task.deadline_at, work_type=getattr(task, "work_type", "general"))
     return assess_task_intervals(task, intervals, now)
 
 
@@ -440,6 +457,7 @@ class SharedCapacity:
     required_minutes: int
     available_minutes: float
     shortage_minutes: float
+    scope: str = "all"
 
 
 @dataclass(frozen=True)
@@ -476,6 +494,7 @@ def score_task(task: Task, intervals: Iterable[Interval], now: datetime) -> Prio
 
 def check_shared_capacity(
     tasks: Iterable[Task], intervals: Iterable[Interval], now: datetime,
+    *, scope: str = "all",
 ) -> tuple[SharedCapacity, ...]:
     _require_aware(now)
     demand = {}
@@ -493,7 +512,7 @@ def check_shared_capacity(
             (max(begin, now), min(finish, deadline))
             for begin, finish in available if max(begin, now) < min(finish, deadline)
         )
-        results.append(SharedCapacity(deadline, required, total, max(0, required - total)))
+        results.append(SharedCapacity(deadline, required, total, max(0, required - total), scope))
     return tuple(results)
 
 
@@ -502,6 +521,7 @@ def rank_tasks(
     special: Iterable[SpecialSchedule], now: datetime,
 ) -> PriorityResult:
     _require_aware(now)
+    weekly, special = tuple(weekly), tuple(special)
     overdue, out_of_range, future = [], [], []
     for task in tasks:
         if task.status == "done":
@@ -515,15 +535,24 @@ def rank_tasks(
     intervals = build_available_intervals(
         weekly, special, now, max((task.deadline_at for task in future), default=now)
     )
+    restricted = any(item.available and getattr(item, "study_only", False) for item in (*weekly, *special))
+    general_intervals = build_available_intervals(
+        weekly, special, now, max((task.deadline_at for task in future), default=now), work_type="general"
+    ) if restricted else intervals
     ranked = sorted(
-        (score_task(task, intervals, now) for task in future),
+        (score_task(task, intervals if getattr(task, "work_type", "general") == "study" else general_intervals, now) for task in future),
         key=lambda item: (-item.total, item.task.deadline_at, -item.task.importance, item.task.id),
     )
+    shared = check_shared_capacity(future, intervals, now)
+    if restricted:
+        shared += check_shared_capacity(
+            (task for task in future if getattr(task, "work_type", "general") == "general"), general_intervals, now, scope="general"
+        )
     return PriorityResult(
         ranked=tuple(ranked),
         overdue=tuple(sorted(overdue, key=lambda task: (task.deadline_at, task.id))),
         out_of_range=tuple(sorted(out_of_range, key=lambda task: (task.deadline_at, task.id))),
-        shared=check_shared_capacity(future, intervals, now),
+        shared=shared,
         recommendation=next((item for item in ranked if item.fit == 100), None),
     )
 
@@ -544,12 +573,12 @@ def prepare_life_times(raw: list) -> list[dict]:
             raise ValueError("생활시간표의 비고를 글자로 입력하세요.")
         begin = item.get("start_time")
         finish = item.get("end_time")
-        if not isinstance(finish, str) or parse_deadline_time(finish) is None:
-            raise ValueError("생활시간표의 종료 시각을 확인하세요.")
-        if begin is not None and (
-            not isinstance(begin, str) or parse_deadline_time(begin) is None
-            or parse_deadline_time(begin) >= parse_deadline_time(finish)
-        ):
+        if begin is None and finish is None:
+            raise ValueError("생활시간표의 시작이나 종료 시각이 필요합니다.")
+        for clock_value in (begin, finish):
+            if clock_value is not None and (not isinstance(clock_value, str) or parse_deadline_time(clock_value) is None):
+                raise ValueError("생활시간표의 시각을 확인하세요.")
+        if begin is not None and finish is not None and parse_deadline_time(begin) >= parse_deadline_time(finish):
             raise ValueError("생활시간표의 시작과 종료 시각을 확인하세요.")
         result.append({**item, "weekdays": list(days)})
     return result
