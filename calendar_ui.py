@@ -8,11 +8,11 @@ import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 from streamlit_calendar import calendar
 
-from algorithm import KST, WEEKDAY_LABELS, TaskInputError, ScheduleInputError, deadline_input_date, korean_now, prepare_life_times, validate_schedule, validate_task
+from algorithm import KST, WEEKDAY_LABELS, TaskInputError, ScheduleInputError, deadline_input_date, korean_now, prepare_life_times, schedule_travel_intervals, validate_schedule, validate_task
 
 
 EXAMPLE_PATH = Path(__file__).resolve().parent / "data" / "example_schedule.json"
-EXAMPLE_REVISION = 4
+EXAMPLE_REVISION = 6
 
 
 def example_id(value: str) -> str:
@@ -51,7 +51,7 @@ def prepare_example(data: dict):
         entries.append(entry)
     for index, raw in enumerate(data["example_available_times"]):
         schedule = validate_schedule(raw, kind="weekly", now=reference)
-        schedule = replace(schedule, id=example_id(f"weekly-{index}"))
+        schedule = replace(schedule, id=example_id(raw.get("example_key", f"weekly-{index}")))
         schedules[schedule.id] = schedule
     return tasks, schedules, entries, reference
 
@@ -79,6 +79,7 @@ def load_example(state, data: dict) -> bool:
     state["example_use_reference"] = True
     state["example_loaded"] = True
     state["example_revision"] = data.get("example_revision", 1)
+    state.pop("auto_free", None)
     return True
 
 
@@ -88,14 +89,21 @@ def update_example_life_times(state, data: dict) -> None:
     if not life_times:
         raise ValueError("갱신된 예시 원본을 먼저 설정하세요.")
     previous = {}
-    for index, raw in enumerate(data.get("previous_available_times", [])):
-        schedule = validate_schedule(raw, kind="weekly", now=reference)
-        schedule = replace(schedule, id=example_id(f"weekly-{index}"))
-        previous[schedule.id] = schedule
+    previous_sets = data.get("previous_available_by_revision", {}).get(str(state.get("example_revision", 1)))
+    if previous_sets is None:
+        previous_sets = [data.get("previous_available_times", []), *data.get("previous_available_time_sets", [])]
+    for rows in previous_sets:
+        for index, raw in enumerate(rows):
+            schedule = validate_schedule(raw, kind="weekly", now=reference)
+            schedule = replace(schedule, id=example_id(raw.get("example_key", f"weekly-{index}")))
+            previous.setdefault(schedule.id, []).append(schedule)
     updated = dict(state["weekly_schedules"])
-    for key, old in previous.items():
+    for key, candidates in previous.items():
         current = updated.get(key)
-        if current is not None and all(getattr(current, name, False if name == "study_only" else None) == value for name, value in asdict(old).items()):
+        if current is not None and any(all(
+            getattr(current, name, 15 if name == "travel_minutes" else False if name == "study_only" else None) == value
+            for name, value in asdict(old).items()
+        ) for old in candidates):
             updated.pop(key)
             if key in proposed:
                 updated[key] = proposed[key]
@@ -114,6 +122,7 @@ def update_example_life_times(state, data: dict) -> None:
     state["tasks"] = tasks
     state["example_life_times"] = life_times
     state["example_revision"] = data.get("example_revision", 1)
+    state.pop("auto_free", None)
 
 
 def render_example_controls(auto_load: bool = False) -> datetime:
@@ -148,6 +157,27 @@ def render_example_controls(auto_load: bool = False) -> datetime:
         if use_reference:
             return reference
     return korean_now()
+
+
+def weekly_travel_events(item) -> list[dict]:
+    minutes = getattr(item, "travel_minutes", 15)
+    if not minutes:
+        return []
+    begin = item.start_time.hour * 60 + item.start_time.minute
+    finish = item.end_time.hour * 60 + item.end_time.minute + (1440 if item.end_next_day else 0)
+    result = []
+    for suffix, first, last in (("before", begin - minutes, begin), ("after", finish, finish + minutes)):
+        shift = first // 1440
+        first, last = first - shift * 1440, last - shift * 1440
+        result.append({
+            "id": f"{item.id}-travel-{suffix}", "title": f"이동: {item.title} ({minutes}분)",
+            "daysOfWeek": [(day + 1 + shift) % 7 for day in item.weekdays],
+            "startTime": f"{first // 60:02d}:{first % 60:02d}",
+            "endTime": f"{last // 60:02d}:{last % 60:02d}",
+            "color": "#e9eef4",
+            "extendedProps": {"description": "가용시간에서 제외되는 이동 구간입니다."},
+        })
+    return result
 
 
 def calendar_events(tasks, weekly, special, entries, life_times=()):
@@ -185,6 +215,7 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
             event["end"] = (end + timedelta(days=1)).isoformat()
         events.append(event)
     for item in weekly.values():
+        events.extend(weekly_travel_events(item))
         end_hour = item.end_time.hour + (24 if item.end_next_day else 0)
         events.append({
             "id": item.id, "title": f"{'공부만 가능' if getattr(item, 'study_only', False) else '가능' if item.available else '불가'}: {item.title}",
@@ -194,6 +225,12 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
             "display": "background", "color": "#edf5ee" if item.available else "#eff0f2",
         })
     for item in special.values():
+        for index, (begin, finish) in enumerate(schedule_travel_intervals(item.start_at, item.end_at, getattr(item, "travel_minutes", 15))):
+            events.append({
+                "id": f"{item.id}-travel-{index}", "title": f"이동: {item.title}",
+                "start": begin.isoformat(), "end": finish.isoformat(), "color": "#e9eef4",
+                "extendedProps": {"description": "가용시간에서 제외되는 이동 구간입니다."},
+            })
         events.append({
             "id": item.id, "title": f"{'공부만 가능' if getattr(item, 'study_only', False) else '가능' if item.available else '불가'}: {item.title}",
             "start": item.start_at.isoformat(), "end": item.end_at.isoformat(),
