@@ -156,8 +156,9 @@ def render_availability(
     tasks: dict[str, Task],
     weekly: dict[str, WeeklySchedule],
     special: dict[str, SpecialSchedule],
+    reference_now: datetime | None = None,
 ) -> None:
-    now = korean_now()
+    now = reference_now if reference_now is not None else korean_now()
     st.button("계산 새로고침", key="capacity_refresh")
     st.caption(f"기준: {now:%Y-%m-%d %H:%M} 한국 시각")
     if not weekly and not special:
@@ -205,13 +206,13 @@ def render_availability(
         except AvailabilityRangeError:
             rows.append({
                 "작업명": task.title, "마감": format_deadline(task),
-                "잔여시간(분)": task.remaining_minutes, "가용시간(분)": None,
+                "예상 작업시간(분)": task.remaining_minutes, "가용시간(분)": None,
                 "여유(분)": None, "최대 연속(분)": None, "확인": "10년 초과, 미계산",
             })
             continue
         rows.append({
             "작업명": task.title, "마감": format_deadline(task),
-            "잔여시간(분)": task.remaining_minutes,
+            "예상 작업시간(분)": task.remaining_minutes,
             "가용시간(분)": round(result.available_minutes, 1),
             "여유(분)": round(result.slack_minutes, 1),
             "최대 연속(분)": round(result.longest_minutes, 1), "확인": result.message,
