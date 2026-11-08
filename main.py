@@ -275,7 +275,7 @@ def main() -> None:
     st.set_page_config(page_title="작업 우선순위 결정 시스템", layout="centered")
     st.markdown("""
         <style>
-        .block-container { max-width: 1040px; padding-top: 1.8rem; }
+        .block-container { max-width: 1200px; padding-top: 1.8rem; }
         [data-testid="stTabs"] button { padding-left: 0.65rem; padding-right: 0.65rem; }
         </style>
     """, unsafe_allow_html=True)
