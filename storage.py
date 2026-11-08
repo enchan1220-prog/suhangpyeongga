@@ -35,6 +35,7 @@ def make_snapshot(state) -> dict:
             "example_loaded": state.get("example_loaded", False),
             "example_use_reference": state.get("example_use_reference", False),
             "example_reference": state.get("example_reference"),
+            **({"example_revision": state["example_revision"]} if "example_revision" in state else {}),
         },
         "example_entries": state.get("example_entries", []),
         "example_life_times": state.get("example_life_times", []),
@@ -95,6 +96,10 @@ def unpack_snapshot(payload: dict) -> dict:
         settings = payload.get("settings", {})
         if not isinstance(settings, dict):
             raise ValueError("계산 설정 형식을 확인하세요.")
+        if "example_revision" in settings:
+            if type(settings["example_revision"]) is not int or settings["example_revision"] < 0:
+                raise ValueError("예시 조건 버전을 확인하세요.")
+            result["example_revision"] = settings["example_revision"]
         for key in ("example_loaded", "example_use_reference"):
             value = settings.get(key, False)
             if type(value) is not bool:
@@ -175,4 +180,3 @@ def load_local(path: Path = WORKSPACE_PATH) -> dict:
     except OSError:
         raise StorageError("로컬 파일을 읽지 못했습니다. 폴더 접근 권한을 확인하세요.") from None
     return import_backup(content)
-
