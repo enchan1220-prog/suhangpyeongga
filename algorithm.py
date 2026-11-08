@@ -76,9 +76,9 @@ def validate_task(
 
     remaining = raw.get("remaining_minutes")
     if type(remaining) is not int or remaining < 0:
-        errors["remaining_minutes"] = "잔여시간은 0 이상의 정수로 입력하세요."
+        errors["remaining_minutes"] = "예상 작업시간은 0 이상의 정수로 입력하세요."
     elif status != "done" and remaining == 0:
-        errors["remaining_minutes"] = "미완료 작업의 잔여시간은 1분 이상이어야 합니다."
+        errors["remaining_minutes"] = "미완료 작업의 예상 작업시간은 1분 이상이어야 합니다."
 
     splittable = raw.get("splittable")
     if type(splittable) is not bool:
@@ -378,16 +378,19 @@ class TaskAvailability:
     message: str
 
 
-def assess_task_availability(
+def assess_task_intervals(
     task: Task,
-    weekly: Iterable[WeeklySchedule],
-    special: Iterable[SpecialSchedule],
+    intervals: Iterable[Interval],
     now: datetime,
 ) -> TaskAvailability:
     _require_aware(now)
     if task.status == "done":
         return TaskAvailability(0, 0, 0, 0, 0, "완료")
-    intervals = build_available_intervals(weekly, special, now, task.deadline_at)
+    intervals = merge_intervals(
+        (max(begin, now), min(finish, task.deadline_at))
+        for begin, finish in intervals
+        if max(begin, now) < min(finish, task.deadline_at)
+    )
     total = interval_minutes(intervals)
     longest = max((interval_minutes([item]) for item in intervals), default=0)
     current = next(
@@ -404,3 +407,149 @@ def assess_task_availability(
     else:
         message = "개별 시간 충분"
     return TaskAvailability(total, current, longest, total - task.remaining_minutes, shortage, message)
+
+
+def assess_task_availability(
+    task: Task,
+    weekly: Iterable[WeeklySchedule],
+    special: Iterable[SpecialSchedule],
+    now: datetime,
+) -> TaskAvailability:
+    _require_aware(now)
+    if task.status == "done":
+        return TaskAvailability(0, 0, 0, 0, 0, "완료")
+    intervals = build_available_intervals(weekly, special, now, task.deadline_at)
+    return assess_task_intervals(task, intervals, now)
+
+
+@dataclass(frozen=True)
+class PriorityScore:
+    task: Task
+    availability: TaskAvailability
+    pressure: float
+    proximity: float
+    urgency: float
+    importance_score: float
+    fit: float
+    total: float
+
+
+@dataclass(frozen=True)
+class SharedCapacity:
+    deadline_at: datetime
+    required_minutes: int
+    available_minutes: float
+    shortage_minutes: float
+
+
+@dataclass(frozen=True)
+class PriorityResult:
+    ranked: tuple[PriorityScore, ...]
+    overdue: tuple[Task, ...]
+    out_of_range: tuple[Task, ...]
+    shared: tuple[SharedCapacity, ...]
+    recommendation: PriorityScore | None
+
+
+def score_task(task: Task, intervals: Iterable[Interval], now: datetime) -> PriorityScore:
+    _require_aware(now)
+    if task.status == "done" or task.deadline_at <= now:
+        raise ValueError("점수는 미래 마감의 미완료 작업만 계산합니다.")
+    if task.deadline_at - now > timedelta(days=MAX_CALCULATION_DAYS):
+        raise AvailabilityRangeError("마감을 10년 이내로 지정하세요.")
+    availability = assess_task_intervals(task, intervals, now)
+    pressure = (
+        100 * min(1, task.remaining_minutes / availability.available_minutes)
+        if availability.available_minutes > 0 else 100.0
+    )
+    minutes_to_deadline = (task.deadline_at - now).total_seconds() / 60
+    proximity = 100 / (1 + minutes_to_deadline / 1440)
+    urgency = 0.7 * pressure + 0.3 * proximity
+    importance_score = 25.0 * (task.importance - 1)
+    can_start = availability.current_minutes > 0 and (
+        task.splittable or availability.current_minutes >= task.remaining_minutes
+    )
+    fit = 100.0 if can_start else 0.0
+    total = 0.6 * urgency + 0.3 * importance_score + 0.1 * fit
+    return PriorityScore(task, availability, pressure, proximity, urgency, importance_score, fit, total)
+
+
+def check_shared_capacity(
+    tasks: Iterable[Task], intervals: Iterable[Interval], now: datetime,
+) -> tuple[SharedCapacity, ...]:
+    _require_aware(now)
+    demand = {}
+    for task in tasks:
+        if task.status != "done" and task.deadline_at > now:
+            if task.deadline_at - now > timedelta(days=MAX_CALCULATION_DAYS):
+                raise AvailabilityRangeError("마감을 10년 이내로 지정하세요.")
+            demand[task.deadline_at] = demand.get(task.deadline_at, 0) + task.remaining_minutes
+    available = merge_intervals(intervals)
+    required = 0
+    results = []
+    for deadline, minutes in sorted(demand.items()):
+        required += minutes
+        total = interval_minutes(
+            (max(begin, now), min(finish, deadline))
+            for begin, finish in available if max(begin, now) < min(finish, deadline)
+        )
+        results.append(SharedCapacity(deadline, required, total, max(0, required - total)))
+    return tuple(results)
+
+
+def rank_tasks(
+    tasks: Iterable[Task], weekly: Iterable[WeeklySchedule],
+    special: Iterable[SpecialSchedule], now: datetime,
+) -> PriorityResult:
+    _require_aware(now)
+    overdue, out_of_range, future = [], [], []
+    for task in tasks:
+        if task.status == "done":
+            continue
+        if task.deadline_at <= now:
+            overdue.append(task)
+        elif task.deadline_at - now > timedelta(days=MAX_CALCULATION_DAYS):
+            out_of_range.append(task)
+        else:
+            future.append(task)
+    intervals = build_available_intervals(
+        weekly, special, now, max((task.deadline_at for task in future), default=now)
+    )
+    ranked = sorted(
+        (score_task(task, intervals, now) for task in future),
+        key=lambda item: (-item.total, item.task.deadline_at, -item.task.importance, item.task.id),
+    )
+    return PriorityResult(
+        ranked=tuple(ranked),
+        overdue=tuple(sorted(overdue, key=lambda task: (task.deadline_at, task.id))),
+        out_of_range=tuple(sorted(out_of_range, key=lambda task: (task.deadline_at, task.id))),
+        shared=check_shared_capacity(future, intervals, now),
+        recommendation=next((item for item in ranked if item.fit == 100), None),
+    )
+
+
+def prepare_life_times(raw: list) -> list[dict]:
+    if not isinstance(raw, list):
+        raise ValueError("생활시간표 형식을 확인하세요.")
+    result = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("title"), str) or not item["title"].strip():
+            raise ValueError("생활시간표의 일정명을 확인하세요.")
+        days = item.get("weekdays")
+        if not isinstance(days, list) or not days or any(type(day) is not int or not 0 <= day <= 6 for day in days):
+            raise ValueError("생활시간표의 요일을 확인하세요.")
+        if not isinstance(item.get("time_text"), str) or not item["time_text"].strip():
+            raise ValueError("생활시간표의 시간 설명을 확인하세요.")
+        if not isinstance(item.get("note", ""), str):
+            raise ValueError("생활시간표의 비고를 글자로 입력하세요.")
+        begin = item.get("start_time")
+        finish = item.get("end_time")
+        if not isinstance(finish, str) or parse_deadline_time(finish) is None:
+            raise ValueError("생활시간표의 종료 시각을 확인하세요.")
+        if begin is not None and (
+            not isinstance(begin, str) or parse_deadline_time(begin) is None
+            or parse_deadline_time(begin) >= parse_deadline_time(finish)
+        ):
+            raise ValueError("생활시간표의 시작과 종료 시각을 확인하세요.")
+        result.append({**item, "weekdays": list(days)})
+    return result
