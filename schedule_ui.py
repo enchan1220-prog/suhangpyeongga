@@ -5,6 +5,7 @@ import streamlit as st
 from algorithm import (
     KST,
     WEEKDAY_LABELS,
+    WORK_TYPE_LABELS,
     AvailabilityRangeError,
     ScheduleInputError,
     SpecialSchedule,
@@ -71,6 +72,11 @@ def render_schedule_form(kind: str, prefix: str, existing=None) -> None:
             format_func=lambda value: "작업 가능" if value else "작업 불가",
             key=f"{prefix}_available",
         )
+        study_only = st.checkbox(
+            "교과 공부와 문제풀이만 가능", value=getattr(existing, "study_only", False) if existing else False,
+            help="작업 가능한 시간에만 적용합니다. 프로젝트와 보고서는 이 시간을 제외합니다.",
+            key=f"{prefix}_study_only",
+        )
         submitted = st.form_submit_button(
             "일정 변경 저장" if existing else "일정 추가", type="primary", key=f"{prefix}_submit"
         )
@@ -82,6 +88,7 @@ def render_schedule_form(kind: str, prefix: str, existing=None) -> None:
                 "title": title, "weekdays": days, "start_time": start_text,
                 "end_time": end_text, "end_next_day": next_day, "available": available,
                 "start_date": start_date, "end_date": end_date,
+                "study_only": study_only,
             }, kind=kind, existing=existing,
         )
     except ScheduleInputError as error:
@@ -110,6 +117,7 @@ def render_schedule_group(kind: str) -> None:
             else:
                 row = {"일정명": item.title, "시작": f"{item.start_at:%Y-%m-%d %H:%M}", "종료": f"{item.end_at:%Y-%m-%d %H:%M}"}
             row["작업"] = "가능" if item.available else "불가"
+            row["작업 범위"] = "교과 공부와 문제풀이만" if getattr(item, "study_only", False) else "모든 작업"
             rows.append(row)
         st.dataframe(rows, hide_index=True, width="stretch")
     else:
@@ -159,6 +167,10 @@ def render_availability(
     reference_now: datetime | None = None,
 ) -> None:
     now = reference_now if reference_now is not None else korean_now()
+    work_type = st.selectbox(
+        "조회할 작업 종류", options=list(WORK_TYPE_LABELS),
+        format_func=WORK_TYPE_LABELS.__getitem__, key="capacity_work_type",
+    )
     st.button("계산 새로고침", key="capacity_refresh")
     st.caption(f"기준: {now:%Y-%m-%d %H:%M} 한국 시각")
     if not weekly and not special:
@@ -182,7 +194,7 @@ def render_availability(
     else:
         end = datetime.combine(query_end + timedelta(days=1), time.min, KST)
     try:
-        intervals = build_available_intervals(weekly.values(), special.values(), now, end)
+        intervals = build_available_intervals(weekly.values(), special.values(), now, end, work_type=work_type)
     except AvailabilityRangeError as error:
         st.error(str(error))
     else:
