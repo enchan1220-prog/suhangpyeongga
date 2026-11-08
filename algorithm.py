@@ -171,6 +171,7 @@ class WeeklySchedule:
     created_at: datetime
     updated_at: datetime
     study_only: bool = False
+    travel_minutes: int = 15
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,7 @@ class SpecialSchedule:
     created_at: datetime
     updated_at: datetime
     study_only: bool = False
+    travel_minutes: int = 15
 
 
 class ScheduleInputError(ValueError):
@@ -219,6 +221,17 @@ def validate_schedule(
     study_only = raw.get("study_only", False)
     if type(study_only) is not bool:
         errors["study_only"] = "공부 전용 여부를 선택하세요."
+    travel = raw.get("travel_minutes")
+    if isinstance(travel, str):
+        text = travel.strip()
+        try:
+            travel = int(text) if re.fullmatch(r"[0-9]+", text) else None if text else 15
+        except ValueError:
+            travel = None
+    elif travel is None:
+        travel = 15
+    if type(travel) is not int or not 0 <= travel <= 1440:
+        errors["travel_minutes"] = "편도 이동 시간은 0부터 1440분 사이의 정수로 입력하세요. 비우면 15분입니다."
     clocks = {}
     for key, label in (("start_time", "시작 시각"), ("end_time", "종료 시각")):
         try:
@@ -278,6 +291,7 @@ def validate_schedule(
         created_at=existing.created_at if existing else stamp.astimezone(KST),
         updated_at=stamp.astimezone(KST),
         study_only=study_only and available,
+        travel_minutes=travel,
         **details,
     )
 
@@ -330,6 +344,19 @@ def subtract_intervals(
     return result
 
 
+def schedule_travel_intervals(begin: datetime, finish: datetime, minutes: int) -> list[Interval]:
+    travel = timedelta(minutes=minutes)
+    try:
+        before = begin - travel
+    except OverflowError:
+        before = datetime.min.replace(tzinfo=KST)
+    try:
+        after = finish + travel
+    except OverflowError:
+        after = datetime.max.replace(tzinfo=KST)
+    return [(before, begin), (finish, after)] if minutes else []
+
+
 def build_available_intervals(
     weekly: Iterable[WeeklySchedule],
     special: Iterable[SpecialSchedule],
@@ -344,19 +371,25 @@ def build_available_intervals(
         return []
     if end - start > timedelta(days=MAX_CALCULATION_DAYS):
         raise AvailabilityRangeError("계산 기간이 너무 깁니다. 마감이나 종료일을 10년 이내로 지정하세요.")
-    weekly_yes, weekly_no, special_yes, special_no = [], [], [], []
+    weekly_yes, weekly_no, special_yes, special_no, travel_no = [], [], [], [], []
 
     def add_clipped(target: list[Interval], begin: datetime, finish: datetime) -> None:
         begin, finish = max(begin, start), min(finish, end)
         if begin < finish:
             target.append((begin, finish))
 
-    first_day = date.fromordinal(max(1, start.date().toordinal() - 1))
-    last_ordinal = end.date().toordinal()
+    def add_occurrence(schedule, begin: datetime, finish: datetime, yes, no) -> None:
+        for before, after in schedule_travel_intervals(begin, finish, getattr(schedule, "travel_minutes", 15)):
+            add_clipped(travel_no, before, after)
+        restricted = getattr(schedule, "study_only", False) and work_type not in (None, "study")
+        if not schedule.available or restricted:
+            add_clipped(no, begin, finish)
+        elif not restricted:
+            add_clipped(yes, begin, finish)
+
+    first_day = date.fromordinal(max(1, start.date().toordinal() - 2))
+    last_ordinal = min(date.max.toordinal(), end.date().toordinal() + 1)
     for schedule in weekly:
-        if schedule.available and getattr(schedule, "study_only", False) and work_type not in (None, "study"):
-            continue
-        target = weekly_yes if schedule.available else weekly_no
         for weekday in schedule.weekdays:
             first_ordinal = first_day.toordinal() + (weekday - first_day.weekday()) % 7
             for ordinal in range(first_ordinal, last_ordinal + 1, 7):
@@ -368,17 +401,11 @@ def build_available_intervals(
                     finish = datetime.combine(
                         day + timedelta(days=int(schedule.end_next_day)), schedule.end_time, KST
                     )
-                add_clipped(target, begin, finish)
+                add_occurrence(schedule, begin, finish, weekly_yes, weekly_no)
     for schedule in special:
-        if schedule.available and getattr(schedule, "study_only", False) and work_type not in (None, "study"):
-            continue
-        add_clipped(
-            special_yes if schedule.available else special_no,
-            schedule.start_at,
-            schedule.end_at,
-        )
+        add_occurrence(schedule, schedule.start_at, schedule.end_at, special_yes, special_no)
     regular = subtract_intervals(weekly_yes, weekly_no)
-    return subtract_intervals([*regular, *special_yes], special_no)
+    return subtract_intervals([*regular, *special_yes], [*special_no, *travel_no])
 
 
 def interval_minutes(intervals: Iterable[Interval]) -> float:
