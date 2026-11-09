@@ -325,7 +325,7 @@ def render_priorities(tasks, weekly, special, reference) -> None:
         ]
         if upcoming:
             start, _, title = min(upcoming)
-            st.caption(f"다음 착수 가능 시각: {start:%Y-%m-%d %H:%M} 한국 시각 · {title}. 시간표 기준이며 시간을 자동 배정하지 않습니다.")
+            st.caption(f"다음 착수 가능 시각: {start:%Y-%m-%d %H:%M} 한국 시각, {title}. 시간표 기준이며 시간을 자동 배정하지 않습니다.")
         else:
             st.caption("현재 시간표에는 추천 대상 작업을 마감 전에 시작할 수 있는 구간이 없습니다.")
 
