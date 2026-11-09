@@ -250,10 +250,10 @@ def render_reference_controls() -> datetime:
 def render_usage_guide() -> None:
     with st.expander("사용 안내"):
         st.markdown("""
-1. **작업 추가**에서 작업명·마감·남은 예상 작업시간을 입력합니다.
+1. **작업 추가**에서 작업명, 마감, 남은 예상 작업시간을 입력합니다.
 2. **시간표**에서 작업 가능한 구간을 등록합니다. 등록하지 않은 빈 시간은 가용시간으로 계산하지 않습니다.
 3. **우선순위**에서 추천과 판단 근거를 확인합니다. ‘개별 시간 충분’은 마감 전까지의 총시간이며, 지금 시작 가능하다는 뜻은 아닙니다.
-4. 예시 데이터와 기준 시각은 각각 선택할 수 있습니다. 예시를 꺼도 직접 추가한 작업은 유지됩니다. 예시의 중요도·예상 작업시간·가능 시간은 시연용 추정값입니다.
+4. 예시 데이터와 기준 시각은 각각 선택할 수 있습니다. 예시를 꺼도 직접 추가한 작업은 유지됩니다. 예시의 중요도, 예상 작업시간, 가능 시간은 시연용 추정값입니다.
 5. 웹에서는 세션이 끝나면 내용이 사라질 수 있습니다. **저장과 백업**에서 JSON을 내려받으세요. 꺼 둔 예시의 편집 내용과 계산 시각 설정도 백업됩니다.
 """)
 
@@ -269,17 +269,17 @@ def weekly_travel_events(item) -> list[dict]:
         shift = first // 1440
         first, last = first - shift * 1440, last - shift * 1440
         result.append({
-            "id": f"{item.id}-travel-{suffix}", "title": f"이동: {item.title} ({minutes}분)",
+            "id": f"{item.id}-travel-{suffix}", "title": "",
             "daysOfWeek": [(day + 1 + shift) % 7 for day in item.weekdays],
             "startTime": f"{first // 60:02d}:{first % 60:02d}",
             "endTime": f"{last // 60:02d}:{last % 60:02d}",
-            "color": "#e9eef4",
+            "display": "background", "color": "#e9eef4",
             "extendedProps": {"description": "가용시간에서 제외되는 이동 구간입니다."},
         })
     return result
 
 
-def calendar_events(tasks, weekly, special, entries, life_times=()):
+def calendar_events(tasks, weekly, special, entries, *, view="month"):
     events = []
     linked = {entry["task_id"]: entry for entry in entries if "task_id" in entry}
     for task in tasks.values():
@@ -313,7 +313,8 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
         if end < date.max:
             event["end"] = (end + timedelta(days=1)).isoformat()
         events.append(event)
-    for item in weekly.values():
+    # 월간은 마감과 개별 일정만 표시한다. 정기 시간표는 주간에서 확인한다.
+    for item in weekly.values() if view == "week" else ():
         events.extend(weekly_travel_events(item))
         end_hour = item.end_time.hour + (24 if item.end_next_day else 0)
         events.append({
@@ -324,29 +325,19 @@ def calendar_events(tasks, weekly, special, entries, life_times=()):
             "display": "background", "color": "#edf5ee" if item.available else "#eff0f2",
         })
     for item in special.values():
-        for index, (begin, finish) in enumerate(schedule_travel_intervals(item.start_at, item.end_at, getattr(item, "travel_minutes", 15))):
+        travel = schedule_travel_intervals(item.start_at, item.end_at, getattr(item, "travel_minutes", 15)) if view == "week" else ()
+        for index, (begin, finish) in enumerate(travel):
             events.append({
-                "id": f"{item.id}-travel-{index}", "title": f"이동: {item.title}",
+                "id": f"{item.id}-travel-{index}", "title": "", "display": "background",
                 "start": begin.isoformat(), "end": finish.isoformat(), "color": "#e9eef4",
                 "extendedProps": {"description": "가용시간에서 제외되는 이동 구간입니다."},
             })
         events.append({
             "id": item.id, "title": f"{'공부만 가능' if getattr(item, 'study_only', False) else '가능' if item.available else '불가'}: {item.title}",
             "start": item.start_at.isoformat(), "end": item.end_at.isoformat(),
-            "display": "background", "color": "#edf5ee" if item.available else "#eff0f2",
+            "display": "block", "color": "#edf5ee" if item.available else "#eff0f2",
         })
-    for index, item in enumerate(life_times):
-        event = {
-            "id": f"life-{index}", "title": f"{item['title']} ({item['time_text']})",
-            "daysOfWeek": [(day + 1) % 7 for day in item["weekdays"]],
-            "color": "#f5eddf",
-            "extendedProps": {"description": "생활일정 기록입니다. 작업 가능 여부는 시간표 설정을 따릅니다. " + item.get("note", "")},
-        }
-        if item.get("start_time") is None or item.get("end_time") is None:
-            event["allDay"] = True
-        else:
-            event.update(startTime=item["start_time"], endTime=item["end_time"], allDay=False)
-        events.append(event)
+    # 생활일정 원본은 '시간표' 탭의 표에 보관한다. 달력에 중복해서 넣지 않는다.
     return events
 
 
@@ -378,36 +369,38 @@ def calendar_hover_styles(events: list[dict]) -> str:
 
 
 def render_calendar(tasks, weekly, special, reference: datetime) -> None:
-    st.caption("월간은 일정과 마감을, 주간은 시간대와 가능 시간을 확인합니다. 일정 추가는 기존 입력 탭을 사용하세요.")
-    events = calendar_events(tasks, weekly, special, st.session_state.get("example_entries", []), st.session_state.get("example_life_times", []))
+    view = st.radio("달력 보기", ["월간", "주간"], horizontal=True, key="calendar_view", label_visibility="collapsed")
+    month = view == "월간"
+    events = calendar_events(tasks, weekly, special, st.session_state.get("example_entries", []), view="month" if month else "week")
     hover_styles = calendar_hover_styles(events)
     result = calendar(
         events=events,
         options={
-            "initialView": "dayGridMonth", "initialDate": reference.date().isoformat(),
+            "initialView": "dayGridMonth" if month else "timeGridWeek", "initialDate": reference.date().isoformat(),
             "now": reference.isoformat(),
-            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek"},
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": ""},
             "buttonText": {"today": "오늘", "month": "월", "week": "주"},
             "locale": "ko", "firstDay": 1, "aspectRatio": 1.618, "editable": False,
-            "height": "auto", "fixedWeekCount": True,
-            "displayEventTime": True, "displayEventEnd": False,
-            "dayMaxEvents": False, "dayMaxEventRows": False,
+            "height": "auto" if month else 650, "fixedWeekCount": True,
+            "scrollTime": "08:00:00", "allDayText": "종일",
+            "displayEventTime": True, "displayEventEnd": not month,
+            "dayMaxEvents": 3, "moreLinkText": "더 보기", "moreLinkClick": "popover",
             "eventDisplay": "block", "eventTextColor": "#334155",
             "eventBorderColor": "#dce4ec",
-        }, key="schedule_calendar_readable", callbacks=["eventClick"],
+        }, key=f"schedule_calendar_{'month' if month else 'week'}", callbacks=["eventClick"],
         custom_css=hover_styles + "\n" + """
             .fc { --fc-border-color: #e5eaf0; --fc-today-bg-color: #f5f0e5; }
             .fc .fc-toolbar-title { font-size: 1.15rem; color: #334155; }
             .fc .fc-button-primary { background: #edf2f6; border-color: #dce4ec; color: #425466; }
             .fc .fc-button-primary:not(:disabled):hover,
             .fc .fc-button-primary:not(:disabled).fc-button-active { background: #dce7ef; border-color: #ccd9e3; color: #334155; }
-            .fc .fc-daygrid-day-frame { min-height: 170px; }
+            .fc .fc-daygrid-day-frame { min-height: 95px; }
             .fc .fc-daygrid-event { white-space: normal; align-items: flex-start; padding: 3px 4px; }
             .fc .fc-event-title { font-size: 0.86rem; line-height: 1.4; }
+            .fc .fc-bg-event { opacity: 0.65; }
+            .fc .fc-bg-event .fc-event-title { color: #334155; font-style: normal; font-size: 0.8rem; }
             .fc .fc-daygrid-event .fc-event-title {
-                white-space: normal; overflow-wrap: anywhere; word-break: keep-all;
-                display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-                overflow: hidden;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
             }
             .fc .fc-daygrid-event .fc-event-time { flex-shrink: 0; }
             .fc .fc-daygrid-event-harness:hover,
@@ -431,8 +424,8 @@ def render_calendar(tasks, weekly, special, reference: datetime) -> None:
             }
         """,
     )
-    st.caption("연한 초록은 가능 시간, 회색은 불가 시간, 베이지색은 생활일정입니다. 시간 범위가 미정인 생활일정은 날짜 영역에 표시합니다.")
-    st.caption("긴 일정명은 마우스를 올리면 전체를 볼 수 있습니다. 클릭하면 아래에도 표시됩니다.")
+    st.caption("월간은 마감과 개별 일정만 표시합니다. 주간의 초록은 가능 시간, 회색은 불가 시간, 푸른 배경은 이동시간입니다. 생활시간표는 '시간표' 탭에서 확인하세요.")
+    st.caption("긴 일정명은 마우스를 올리거나 클릭하면 전체를 확인할 수 있습니다.")
     if isinstance(result, dict) and result.get("callback") == "eventClick":
         event = result["eventClick"]["event"]
         st.write(event["title"])
